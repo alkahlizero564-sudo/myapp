@@ -1,0 +1,114 @@
+name: build-my-apps
+
+# Builds the My apps application itself (this repo's root) into a signed APK.
+# Run it by hand: Actions tab > build-my-apps > Run workflow.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Create the android folder
+        run: |
+          set -e
+          rm -rf /tmp/bak && mkdir -p /tmp/bak
+          cp -r lib /tmp/bak/lib
+          cp pubspec.yaml /tmp/bak/pubspec.yaml
+          flutter create . --org com.myapps --project-name my_apps --platforms=android
+          rm -rf lib && cp -r /tmp/bak/lib lib
+          cp /tmp/bak/pubspec.yaml pubspec.yaml
+          flutter pub get
+
+      - name: Name and permissions
+        run: |
+          python3 - <<'PY'
+          import re
+          p = "android/app/src/main/AndroidManifest.xml"
+          s = open(p, encoding="utf-8").read()
+          s = re.sub(r'android:label="[^"]*"', 'android:label="My apps"', s, count=1)
+          s = s.replace("<application", '<application\n        android:usesCleartextTraffic="true"', 1)
+          perms = ["android.permission.INTERNET", "android.permission.REQUEST_INSTALL_PACKAGES"]
+          add = "".join('    <uses-permission android:name="%s"/>\n' % x for x in perms if x not in s)
+          s = s.replace("<application", add + "    <application", 1)
+          open(p, "w", encoding="utf-8").write(s)
+          PY
+
+      - name: Fixed signing key for My apps
+        run: |
+          set -e
+          mkdir -p keys
+          KS="keys/host.jks"
+          if [ ! -f "$KS" ]; then
+            PASS=$(openssl rand -hex 16)
+            keytool -genkeypair -keystore "$KS" -alias upload -keyalg RSA -keysize 2048 -validity 10000 -storepass "$PASS" -keypass "$PASS" -dname "CN=My apps, O=My apps, C=SD"
+            echo "$PASS" > "keys/host.pass"
+            git config user.name "github-actions"
+            git config user.email "actions@github.com"
+            git add -f keys
+            git commit -m "add signing key for My apps"
+            git push
+          fi
+          PASS=$(cat "keys/host.pass")
+          cat > android/key.properties <<EOF
+          storePassword=$PASS
+          keyPassword=$PASS
+          keyAlias=upload
+          storeFile=$GITHUB_WORKSPACE/$KS
+          EOF
+
+      - name: Sign release builds with that key
+        working-directory: android/app
+        run: |
+          python3 - <<'PY'
+          import os, re
+          kts = os.path.exists("build.gradle.kts")
+          p = "build.gradle.kts" if kts else "build.gradle"
+          s = open(p, encoding="utf-8").read()
+          if "keystoreProperties" not in s:
+              if kts:
+                  head = "import java.util.Properties\nimport java.io.FileInputStream\n\n"
+                  load = 'val keystoreProperties = Properties()\nval keystorePropertiesFile = rootProject.file("key.properties")\nif (keystorePropertiesFile.exists()) {\n    keystoreProperties.load(FileInputStream(keystorePropertiesFile))\n}\n\n'
+                  signing = '    signingConfigs {\n        create("release") {\n            keyAlias = keystoreProperties["keyAlias"] as String\n            keyPassword = keystoreProperties["keyPassword"] as String\n            storeFile = file(keystoreProperties["storeFile"] as String)\n            storePassword = keystoreProperties["storePassword"] as String\n        }\n    }\n'
+                  s = head + s
+                  s = s.replace("android {", load + "android {\n" + signing, 1)
+                  s = re.sub(r'signingConfig\s*=\s*signingConfigs\.getByName\("debug"\)', 'signingConfig = signingConfigs.getByName("release")', s)
+                  ok = 'getByName("release")' in s
+              else:
+                  load = "def keystoreProperties = new Properties()\ndef keystorePropertiesFile = rootProject.file('key.properties')\nif (keystorePropertiesFile.exists()) {\n    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))\n}\n\n"
+                  signing = "    signingConfigs {\n        release {\n            keyAlias keystoreProperties['keyAlias']\n            keyPassword keystoreProperties['keyPassword']\n            storeFile file(keystoreProperties['storeFile'])\n            storePassword keystoreProperties['storePassword']\n        }\n    }\n"
+                  s = s.replace("android {", load + "android {\n" + signing, 1)
+                  s = re.sub(r'signingConfig\s+signingConfigs\.debug', 'signingConfig signingConfigs.release', s)
+                  ok = "signingConfigs.release" in s
+              if not ok:
+                  raise SystemExit("Could not patch the release signing config")
+              open(p, "w", encoding="utf-8").write(s)
+          PY
+
+      - name: Build APK
+        run: |
+          flutter build apk --release
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-release.apk dist/My-apps.apk
+
+      - name: Publish the APK as a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "my-apps-${{ github.run_number }}" dist/My-apps.apk --title "My apps build ${{ github.run_number }}" --notes "Signed release build of My apps."
