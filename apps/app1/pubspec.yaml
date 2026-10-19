@@ -1,5 +1,5 @@
 name: app1
-description: "متجر الهواتف الذكية - متجر إلكتروني متكامل"
+description: متجر إلكتروني للهواتف الذكية
 publish_to: "none"
 version: 1.0.0+1
 
@@ -9,15 +9,12 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_localizations:
-    sdk: flutter
-  provider: ^6.1.2
-  shared_preferences: ^2.2.3
-  intl: ^0.19.0
+  shared_preferences: ^2.5.3
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  flutter_lints: ^5.0.0
 
 flutter:
   uses-material-design: true
