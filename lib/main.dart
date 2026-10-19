@@ -483,8 +483,34 @@ RULES
     return files;
   }
 
-  static Future<String> _ask(String system, String prompt) =>
-      Store.i.provider == 'claude' ? _claude(system, prompt) : _gemini(system, prompt);
+  /// Uses the chosen AI. If it keeps failing and you saved a key for the
+  /// other one (Gemini or Claude), the request goes to the other one.
+  static Future<String> _ask(String system, String prompt) async {
+    final primary = Store.i.provider == 'claude' ? 'claude' : 'gemini';
+    final other = primary == 'claude' ? 'gemini' : 'claude';
+    try {
+      return primary == 'claude'
+          ? await _claude(system, prompt)
+          : await _gemini(system, prompt);
+    } on AiException catch (first) {
+      if (!await _hasKey(other)) rethrow;
+      try {
+        return other == 'claude'
+            ? await _claude(system, prompt)
+            : await _gemini(system, prompt);
+      } on AiException {
+        throw first;
+      }
+    }
+  }
+
+  static Future<bool> _hasKey(String provider) async {
+    if (provider == 'claude') return (await Store.i.getKey(K.claude)).isNotEmpty;
+    for (final k in K.gemini) {
+      if ((await Store.i.getKey(k)).isNotEmpty) return true;
+    }
+    return false;
+  }
 
   /// Tries every Gemini key you saved, moving on when one is rate limited.
   static Future<String> _gemini(String system, String prompt) async {
@@ -497,6 +523,7 @@ RULES
 
     var last = '';
     for (final key in keys) {
+     for (var attempt = 0; attempt < 3; attempt++) {
       final res = await http
           .post(
             Uri.parse(
@@ -531,10 +558,16 @@ RULES
         final out = parts?.map((e) => (e as Map)['text'] ?? '').join() ?? '';
         if (out.isNotEmpty) return out;
         last = 'رد فارغ من Gemini';
-        continue;
+        break;
       }
       last = 'Gemini ${res.statusCode}: ${tail(text, 300)}';
-      if (![429, 500, 503, 403].contains(res.statusCode)) break;
+      // 429 / 500 / 503 are temporary: wait and retry the same key.
+      if ([429, 500, 503].contains(res.statusCode) && attempt < 2) {
+        await Future.delayed(Duration(seconds: 8 * (attempt + 1)));
+        continue;
+      }
+      break;
+     }
     }
     throw AiException(last);
   }
@@ -792,20 +825,36 @@ class GitHubService {
     return s;
   }
 
+  /// Sends a request; if the mobile connection drops, waits and tries again
+  /// (up to 4 times) before giving up.
   Future<http.Response> _send(String method, String path, {Object? body}) async {
-    final req = http.Request(method, Uri.parse('$_api$path'));
-    req.followRedirects = false;
-    req.headers.addAll({
-      'Authorization': 'Bearer $token',
-      'Accept': 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
-    });
-    if (body != null) {
-      req.headers['content-type'] = 'application/json';
-      req.body = jsonEncode(body);
+    Object? lastError;
+    for (var attempt = 0; attempt < 4; attempt++) {
+      try {
+        final req = http.Request(method, Uri.parse('$_api$path'));
+        req.followRedirects = false;
+        req.headers.addAll({
+          'Authorization': 'Bearer $token',
+          'Accept': 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+        });
+        if (body != null) {
+          req.headers['content-type'] = 'application/json';
+          req.body = jsonEncode(body);
+        }
+        final streamed = await req.send().timeout(const Duration(seconds: 90));
+        return await http.Response.fromStream(streamed);
+      } on http.ClientException catch (e) {
+        lastError = e;
+      } on SocketException catch (e) {
+        lastError = e;
+      } on TimeoutException catch (e) {
+        lastError = e;
+      }
+      await Future.delayed(Duration(seconds: 3 * (attempt + 1)));
     }
-    final streamed = await req.send().timeout(const Duration(seconds: 90));
-    return http.Response.fromStream(streamed);
+    throw GitHubException(
+        'انقطع الاتصال بالإنترنت أثناء التواصل مع GitHub. تأكد من الشبكة وأعد المحاولة. ($lastError)');
   }
 
   Future<Map<String, dynamic>> _json(
@@ -1889,6 +1938,7 @@ class _PreviewScreenState extends State<PreviewScreen> {
   WebViewController? _web;
   String _message = 'جارٍ تجهيز المعاينة…';
   String? _error;
+  final List<String> _log = [];
 
   @override
   void initState() {
@@ -1904,7 +1954,9 @@ class _PreviewScreenState extends State<PreviewScreen> {
         (stage, msg) {
           if (mounted) setState(() => _message = msg);
         },
-        (_) {},
+        (t) {
+          if (mounted) setState(() => _log.add(t));
+        },
       );
       final files = unzip(zip);
 
@@ -1944,9 +1996,31 @@ class _PreviewScreenState extends State<PreviewScreen> {
       appBar: AppBar(title: const Text('معاينة فعلية')),
       body: _error != null
           ? Padding(
-              padding: const EdgeInsets.all(24),
-              child: Center(
-                child: Text(_error!, style: const TextStyle(color: kBad)),
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  SelectableText(
+                    _error!,
+                    textDirection: TextDirection.ltr,
+                    style: const TextStyle(color: kBad),
+                  ),
+                  const SizedBox(height: 12),
+                  if (_log.isNotEmpty)
+                    Expanded(
+                      child: SingleChildScrollView(
+                        child: SelectableText(
+                          _log.join('\n'),
+                          textDirection: TextDirection.ltr,
+                          style: const TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 12,
+                            color: kMuted,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
               ),
             )
           : web == null
