@@ -264,7 +264,7 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
                   const SizedBox(height: 8),
                   _buildSpecTable(context),
 
-                  const SizedBox(height: 100), // spacing for bottom bar
+                  const SizedBox(height: 100),
                 ],
               ),
             ),
@@ -371,7 +371,7 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
 
     return Container(
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.35),
+        color: const Color(0xFFF1F5F9),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: Colors.grey.shade200),
       ),
