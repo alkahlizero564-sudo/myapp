@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../models/phone.dart';
 import '../providers/store_provider.dart';
 import '../widgets/phone_card.dart';
 
@@ -36,9 +37,9 @@ class HomeScreen extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 10),
-            const Column(
+            Column(
               crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
+              children: const [
                 Text(
                   'متجر الهواتف الذكية',
                   style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
@@ -282,7 +283,7 @@ class HomeScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildFeaturedGrid(List<dynamic> list) {
+  Widget _buildFeaturedGrid(List<Phone> list) {
     return GridView.builder(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       physics: const NeverScrollableScrollPhysics(),
@@ -311,7 +312,7 @@ class HomeScreen extends StatelessWidget {
       margin: const EdgeInsets.symmetric(horizontal: 16),
       padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 10),
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.4),
+        color: const Color(0xFFF1F5F9),
         borderRadius: BorderRadius.circular(16),
       ),
       child: Row(
@@ -337,7 +338,7 @@ class HomeScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildAllPhonesGrid(List<dynamic> list) {
+  Widget _buildAllPhonesGrid(List<Phone> list) {
     return GridView.builder(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       physics: const NeverScrollableScrollPhysics(),
