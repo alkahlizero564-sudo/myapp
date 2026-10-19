@@ -211,10 +211,11 @@ class K {
   static const sbToken = 'sb_token';
   static const sbRef = 'sb_ref';
   static const claude = 'claude_key';
+  static const manus = 'manus_key';
   static const gemini = ['gemini_0', 'gemini_1', 'gemini_2', 'gemini_3', 'gemini_4'];
 
   static List<String> get all =>
-      [ghToken, ghRepo, sbToken, sbRef, claude, ...gemini];
+      [ghToken, ghRepo, sbToken, sbRef, claude, manus, ...gemini];
 }
 
 /// One of the two apps the user builds (id 1 or 2).
@@ -289,7 +290,7 @@ class Store extends ChangeNotifier {
   final _secure = const FlutterSecureStorage();
   final List<AppProject> projects = [AppProject(id: 1), AppProject(id: 2)];
 
-  /// 'gemini' or 'claude': which AI writes the code.
+  /// 'gemini', 'claude' or 'manus': which AI writes the code.
   String provider = 'gemini';
 
   Directory? _dir;
@@ -371,7 +372,7 @@ class AiException implements Exception {
   String toString() => message;
 }
 
-/// Talks to Gemini or Claude. Generated apps are ALWAYS Flutter (Dart).
+/// Talks to Gemini, Claude or Manus. Generated apps are ALWAYS Flutter (Dart).
 class AiService {
   /// Change here if Google publishes a different model id.
   static const geminiModel = 'gemini-3.8-flash';
@@ -483,9 +484,11 @@ RULES
     return files;
   }
 
-  /// Uses the chosen AI. If it keeps failing and you saved a key for the
-  /// other one (Gemini or Claude), the request goes to the other one.
+  /// Uses the chosen AI. Manus runs alone (it is slow and uses your Manus
+  /// credits, so there is no automatic switch). If Gemini or Claude keeps
+  /// failing and you saved a key for the other one, the request goes to it.
   static Future<String> _ask(String system, String prompt) async {
+    if (Store.i.provider == 'manus') return _manus(system, prompt);
     final primary = Store.i.provider == 'claude' ? 'claude' : 'gemini';
     final other = primary == 'claude' ? 'gemini' : 'claude';
     try {
@@ -510,6 +513,117 @@ RULES
       if ((await Store.i.getKey(k)).isNotEmpty) return true;
     }
     return false;
+  }
+
+  /// Manus is an agent: create a task, then poll its messages until it stops.
+  static Future<String> _manus(String system, String prompt) async {
+    final key = await Store.i.getKey(K.manus);
+    if (key.isEmpty) throw AiException('أضف مفتاح Manus في قائمة المفاتيح.');
+    final headers = {
+      'content-type': 'application/json',
+      'x-manus-api-key': key,
+    };
+    final wantBlocks = system.contains('=== FILE: ');
+    final content = '$system\n\n---\n\n$prompt\n\n'
+        'IMPORTANT: Reply with the complete answer as plain text inside your chat message, '
+        'exactly in the output format described above. Do NOT create files, attachments or links, '
+        'do not use any tools, and do not add explanations.';
+
+    http.Response created;
+    try {
+      created = await http
+          .post(
+            Uri.parse('https://api.manus.ai/v2/task.create'),
+            headers: headers,
+            body: jsonEncode({
+              'message': {'content': content},
+            }),
+          )
+          .timeout(const Duration(seconds: 60));
+    } catch (e) {
+      throw AiException('تعذر الاتصال بـ Manus: $e');
+    }
+    final createdText = bodyOf(created);
+    var cj = <String, dynamic>{};
+    try {
+      cj = jsonDecode(createdText) as Map<String, dynamic>;
+    } catch (_) {}
+    if (![200, 201].contains(created.statusCode) || cj['ok'] == false) {
+      final msg = (cj['error'] as Map?)?['message'] ?? tail(createdText, 300);
+      throw AiException('Manus ${created.statusCode}: $msg');
+    }
+    final taskId =
+        (cj['task_id'] ?? (cj['data'] as Map?)?['task_id'])?.toString() ?? '';
+    if (taskId.isEmpty) throw AiException('Manus لم يرجع رقم المهمة.');
+
+    final deadline = DateTime.now().add(const Duration(minutes: 15));
+    var failures = 0;
+    var emptyStops = 0;
+    while (DateTime.now().isBefore(deadline)) {
+      await Future.delayed(const Duration(seconds: 6));
+      http.Response r;
+      try {
+        r = await http
+            .get(
+              Uri.parse(
+                  'https://api.manus.ai/v2/task.listMessages?task_id=${Uri.encodeQueryComponent(taskId)}&order=desc&limit=50'),
+              headers: headers,
+            )
+            .timeout(const Duration(seconds: 60));
+      } catch (_) {
+        if (++failures > 5) {
+          throw AiException('انقطع الاتصال بـ Manus أثناء الانتظار.');
+        }
+        continue;
+      }
+      if (r.statusCode != 200) {
+        if (++failures > 5) {
+          throw AiException('Manus ${r.statusCode}: ${tail(bodyOf(r), 300)}');
+        }
+        continue;
+      }
+      failures = 0;
+      final j = jsonDecode(bodyOf(r)) as Map<String, dynamic>;
+      final msgs = ((j['messages'] as List?) ?? []).whereType<Map>().toList();
+
+      // Newest first: the first status_update is the current state.
+      String? status;
+      for (final m in msgs) {
+        final su = m['status_update'];
+        if (su is Map) {
+          status = su['agent_status']?.toString();
+          break;
+        }
+      }
+      if (status == 'error') {
+        for (final m in msgs) {
+          final em = m['error_message'];
+          if (em is Map) throw AiException('Manus: ${em['content']}');
+        }
+        throw AiException('Manus أعاد خطأ.');
+      }
+      if (status == 'waiting') {
+        throw AiException(
+            'Manus ينتظر رداً منك. افتح المهمة في تطبيق Manus ثم أعد المحاولة.');
+      }
+      if (status == 'stopped') {
+        String? fallback;
+        for (final m in msgs) {
+          final am = m['assistant_message'];
+          if (am is Map) {
+            final t = (am['content'] ?? '').toString();
+            if (t.isEmpty) continue;
+            if (!wantBlocks || t.contains('=== FILE: ')) return t;
+            fallback ??= t;
+          }
+        }
+        if (fallback != null) return fallback;
+        if (++emptyStops > 3) {
+          throw AiException('انتهت مهمة Manus بدون رد نصي. أعد المحاولة.');
+        }
+      }
+    }
+    throw AiException('انتهت مهلة انتظار Manus.');
   }
 
   /// Tries every Gemini key you saved, moving on when one is rate limited.
@@ -1288,10 +1402,19 @@ class _KeysScreenState extends State<KeysScreen> {
             segments: const [
               ButtonSegment(value: 'gemini', label: Text('Gemini')),
               ButtonSegment(value: 'claude', label: Text('Claude')),
+              ButtonSegment(value: 'manus', label: Text('Manus')),
             ],
             selected: {_provider},
             onSelectionChanged: (s) => setState(() => _provider = s.first),
           ),
+          if (_provider == 'manus')
+            const Padding(
+              padding: EdgeInsets.only(top: 10),
+              child: Text(
+                'Manus وكيل ينفّذ مهمة كاملة، فهو أبطأ (قد يأخذ عدة دقائق) ويستهلك رصيد حسابك في Manus.',
+                style: TextStyle(fontSize: 12, height: 1.5, color: kWarn),
+              ),
+            ),
         ]),
         _section('GitHub', [
           _field(K.ghToken, 'Access Token', hint: 'ghp_••••••••'),
@@ -1313,6 +1436,9 @@ class _KeysScreenState extends State<KeysScreen> {
         ),
         _section('Claude', [
           _field(K.claude, 'مفتاح API', hint: 'sk-ant-••••••••'),
+        ]),
+        _section('Manus', [
+          _field(K.manus, 'مفتاح API', hint: '••••••••'),
         ]),
         FilledButton(onPressed: _save, child: const Text('حفظ المفاتيح')),
         const SizedBox(height: 12),
