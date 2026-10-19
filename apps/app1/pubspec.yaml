@@ -1,6 +1,7 @@
 name: app1
-description: متجر إلكتروني للهواتف الذكية
+description: تطبيق ايا شخص عايز امل بلدي
 publish_to: "none"
+
 version: 1.0.0+1
 
 environment:
